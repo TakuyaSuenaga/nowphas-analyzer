@@ -10,8 +10,9 @@ __license__ = "MIT"
 import os
 import io
 import glob
-from datetime import datetime
+import datetime
 import argparse
+import numpy as np
 import pandas as pd
 import openpyxl as px
 from openpyxl.chart import Reference, RadarChart
@@ -54,9 +55,9 @@ def map_datetime(_datetime):
     Convert year, month, date, and time to datetime type
     """
     if len(str(_datetime)) == 10:
-        return datetime.strptime(str(_datetime), "%Y%m%d%H")
+        return datetime.datetime.strptime(str(_datetime), "%Y%m%d%H")
     else:
-        return datetime.strptime(str(_datetime), "%Y%m%d%H%M")
+        return datetime.datetime.strptime(str(_datetime), "%Y%m%d%H%M")
 
 
 def add_rader_chart(filepath, sheetname):
@@ -69,14 +70,14 @@ def add_rader_chart(filepath, sheetname):
     # format
     from openpyxl.styles.numbers import builtin_format_code
     for index in range(3, 15):
-        ws.cell(index, 6).number_format = builtin_format_code(10)
-        ws.cell(index, 6).number_format = '0.0%'
+        ws.cell(index, 3).number_format = builtin_format_code(10)
+        ws.cell(index, 3).number_format = '0.0%'
 
     # chart
     rmin = 2
     rmax = 14
-    cmin = 5
-    cmax = 6
+    cmin = 2
+    cmax = 3
 
     chart = RadarChart()
     chart.type = 'standard'  # 'filled', 'marker', 'standard'
@@ -95,27 +96,19 @@ def add_rader_chart(filepath, sheetname):
     wb.save(filepath)
 
 
-def nowphas_analyzer(dirpath: str) -> None:
+def totaling(df: pd.DataFrame):
     """
     """
-    # Read
-    df = read_dir(dirpath)
-    # convert
-    df = df.replace(
-        [66.66, 666.6, 6666, 77.77, 777.7, 7777, 99.99, 999.9, 9999], None)
-    df = df.dropna()
-    df["年月日時"] = df["年月日時"].apply(map_datetime)
     # binning
     bins = [0, 15, 45, 75, 105, 135, 165, 195, 225, 255, 285, 315, 345, 360]
     labels = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1]
-    df['Dir No'] = pd.cut(df["波向"], bins=bins, labels=labels, ordered=False)
+    df['方角'] = pd.cut(df["波向"], bins=bins, labels=labels, ordered=False)
     # totaling
-    total_df = pd.DataFrame({'num': df.groupby('Dir No')["波数"].sum()})
-    total = total_df["num"].sum()
-    total_df.insert(0, "prob", total_df["num"].apply(lambda x: x / total))
-    total_df.insert(0, "value", list(range(0, 360, 30)))
-    total_df.insert(0, "range2", list(range(15, 360, 30)))
-    total_df.insert(0, "range1", [i % 360 for i in range(345, 690, 30)])
+    total_df = pd.DataFrame({'波数合計': df.groupby('方角')["波数"].sum()})
+    total = total_df["波数合計"].sum()
+    total_df.insert(0, "割合", total_df["波数合計"].apply(lambda x: x / total))
+    total_df.insert(1, "範囲1", list(range(15, 360, 30)))
+    total_df.insert(2, "範囲2", [i % 360 for i in range(345, 690, 30)])
     # write excel
     filename = "nowphas_wave_frequency_distribution.xlsx"
     sheetname = "sheet1"
@@ -124,9 +117,92 @@ def nowphas_analyzer(dirpath: str) -> None:
     add_rader_chart(filename, sheetname)
 
 
+def make_dir_df(df: pd.DataFrame):
+    """
+    波高、周期ごとの波数の集計データ
+    """
+    if df.empty:
+        df = pd.DataFrame([[0]*len(df.columns)], columns=list(df.columns))
+    total = sum(df['波数'])
+    dir_df = pd.pivot_table(
+        df, values="波数", index=["Hs"], columns=["Tp"],
+        # aggfunc=np.sum,
+        aggfunc=lambda x: round(sum(x)/total * 100, 2) if total else 0,
+        margins=True,
+        margins_name='Total',
+        fill_value=0,
+        dropna=False)
+    return dir_df
+
+
+def write_cell(filepath, sheetname, row, col, value):
+    """
+    指定のセルに値を書き込む
+    """
+    wb = px.load_workbook(filepath)
+    ws = wb[sheetname]
+    ws.cell(row=row, column=col, value=value)
+    wb.save(filepath)
+
+
+def output_period(dir_no, df: pd.DataFrame):
+    """
+    波高、周期の集計データをExcelに出力
+    """
+    filename = "nowphas_wave_frequency_distribution.xlsx"
+    sheetname = "sheet1"
+    row_offset = (25 * (dir_no - 1))
+    write_cell(filename, sheetname, 2+row_offset, 10, f"direction_{dir_no}")
+    if not df.empty:
+        with pd.ExcelWriter(
+                    filename, mode='a', if_sheet_exists='overlay'
+                ) as writer:
+            df.to_excel(writer, sheetname, startrow=2+row_offset, startcol=9)
+
+
+def frequency_distribution(df: pd.DataFrame):
+    """
+    """
+    # binning
+    bins = np.arange(0, 10.5, 0.5).tolist() + [999.9]
+    labels = []
+    for i in range(0, 10):
+        labels.append("{:.1f}-{:.1f}".format(i, i + 0.5))
+        labels.append("{:.1f}-{:.1f}".format(i + 0.5, i + 1))
+    labels.append(">10.0")
+    df['Hs'] = pd.cut(df["有義波波高"], bins=bins, labels=labels, ordered=False)
+    bins = list(range(0, 16, 1)) + [999.9]
+    labels = [f"{i}-{i+1}" for i in range(0, 15)] + [">15"]
+    df['Tp'] = pd.cut(df["有義波周期"], bins=bins, labels=labels, ordered=False)
+    for dir_no in range(1, 13):
+        dir_df = make_dir_df(df[df["方角"].isin([dir_no])])
+        output_period(dir_no, dir_df)
+
+
+def nowphas_analyzer(dirpath: str) -> None:
+    """
+    """
+    # Read files
+    df = read_dir(dirpath)
+    # remove illegal data
+    df = df.replace(
+        [66.66, 666.6, 6666, 77.77, 777.7, 7777, 99.99, 999.9, 9999], None)
+    df = df.dropna()
+    # change type of str to datetime
+    df["年月日時"] = df["年月日時"].apply(map_datetime)
+    # proccess and write excel
+    totaling(df)
+    frequency_distribution(df)
+
+
 def main(args):
     """ Main entry point of the app """
+    start = datetime.datetime.now()
+    print(start.strftime('%Y-%m-%d %H:%M:%S.%f') + " [START] main()")
     nowphas_analyzer(args.dirpath)
+    end = datetime.datetime.now()
+    print(end.strftime('%Y-%m-%d %H:%M:%S.%f') + " [END] main()")
+    print(f"time: {end - start}")
 
 
 if __name__ == "__main__":
